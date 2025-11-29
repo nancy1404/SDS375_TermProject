@@ -1,0 +1,386 @@
+---
+title: "NPB-to-MLB"
+author: "SDS 375 Group #"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries and Setup
+
+- Load necessary packages (`tidyverse`, `Lahman`, `dplyr`, `stringi`, `readr`)
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readr)
+library(Lahman)
+library(dplyr)
+library(stringi)
+```
+
+```{r}
+library(tidyverse)
+postings <- read.csv("Posting System.csv")
+
+NPB <- c("Chunichi Dragons", "Hanshin Tigers", "Hiroshima Toyo Carp", "Tokyo Yakult Swallows", "Yokohama DeNA BayStars", "Yomiuri Giants", "Chiba Lotte Marines", "Fukuoka SoftBank Hawks", "Hokkaido Nippon-Ham Fighters", "Orix Buffaloes", "Saitama Seibu Lions", "Tohoku Rakuten Golden Eagles")
+
+npb <- postings %>%
+  filter(NPB.Team %in% NPB)
+
+postings <- postings %>% 
+  mutate(datelen = nchar(Posting.Date), yr = as.numeric(substr(Posting.Date, datelen - 3, datelen)))
+
+players <- postings %>% filter(yr >= 2019, yr < 2024)
+```
+
+```{r}
+# Pulling in the player data and merging, including the missing
+npbdata <- read.csv("NPB Player Data 19-25.csv")
+npbmissing <- read.csv("NPB Missing Player Data.csv")
+
+npbmissing <- npbmissing %>% mutate(X1B = TB - (2*X2B) - (3*X3B) - (4*HR))
+
+players <- postings %>% filter(yr >= 2019, yr < 2024)
+
+#just put the names bcs some of them are named differently/nicknames in the fangraphs one 
+pdnames <- c("Yoshi Tsutsugo", "Ryosuke Kikuchi", "Seiya Suzuki", "Masataka Yoshida")
+
+pdata <- npbdata %>% filter(Name %in% pdnames)
+
+pdata <- pdata %>% full_join(npbmissing, by = intersect(colnames(pdata), colnames(npbmissing)))
+
+pave <- pdata %>% group_by(Name) %>% 
+  summarize(aveBB = round(mean(BB),3),
+            aveHBP = round(mean(HBP),3),
+            ave1B = round(mean(X1B),3),
+            ave2B = round(mean(X2B),3),
+            ave3B = round(mean(X3B),3),
+            aveHR = round(mean(HR),3),
+            aveAB = round(mean(AB),3),
+            aveSF = round(mean(SF),3))
+
+head(pave)
+```
+
+```{r}
+# Install & load Lahman if not ready
+# install.packages("Lahman") # Only if you haven't 
+
+# create simple dataset of MLB players with full names and birth year
+mlb_birthyears <- People %>%
+  mutate(Name = paste(nameFirst, nameLast)) %>%
+  select(playerID, Name, birthYear, birthMonth, birthDay)
+
+write_csv(mlb_birthyears, "MLB_BirthYears.csv")
+head(mlb_birthyears)
+```
+
+\newpage
+
+## Data Integration Progress
+
+```{r}
+library(dplyr)
+library(stringi)
+
+# MLB player season-level stats (2020-2025)
+mlb <- read.csv("MLB Player Stats, 2020-2025 - Sheet1.csv") 
+head(mlb)
+
+# woba_factors: Season-by-season weights for calculating wOBA
+woba_factors <- read.csv("wOBA Factors - Sheet1.csv")
+head(woba_factors)
+
+# NPB player stat (2019-2025), including age
+npb <- read.csv("NPB Player Data 19-25.csv")
+head(npb)
+
+# mlb_births: Lahman-derived MLB birthdate info (to calculate MLB ages)
+mlb_births <- read.csv("MLB_BirthYears.csv")
+head(mlb_births)
+```
+
+- **MLB player stats (2020–2025)**: Season-level batting data including AVG, HR, BB, etc.
+- **NPB player stats (2019–2025)**: Similar structure to MLB data but includes player `Age` already.
+- **wOBA Factors**: League-wide constants to calculate wOBA and other weighted metrics by year.
+- **MLB Birth Data**: Extracted from Lahman package; includes birth year/month/da
+
+- `mlb` has complete hitting stats (G, AB, PA, H, BB, HR, etc.) + batting average for players in each MLB season
+  - Player names are stored as strings (e.g., "DJ LeMahieu", "Juan Soto")
+  - Missing birthdates -> need to be added using mlb_births
+
+- `woba_factors` stores yearly coefficients to calculate wOBA and other sabermetrics
+  - needed to normalize offensive performance (make wOBA comparable across years)
+  
+- `npb` already includes player age in each season thankfully
+  - contains similar offensive stats as `mlb`
+  
+- `mlb_births`has:
+  - Name (e.g. "David Aardsma")
+  - birthYear, birthMonth, birthDay
+
+
+```{r}
+mlb_woba <- mlb |>
+  # merges player batting stats with season-specific wOBA coefficients
+  left_join(woba_factors, by = c("SEASON" = "Season")) |> 
+  # calculates wOBA per player per season using MLB's official formula
+  mutate(wOBA = (wBB * BB + wHBP + w1B * X1B + w2B * X2B + w3B * X3B + wHR * HR) / (AB + BB - IBB + SF + HBP)) |> 
+  # selects relevant columns: Player name (from G), team, season, split (e.g., "SECOND"), and computed wOBA
+  select(Player = G, Team, Season = SEASON, Split = SPLIT, wOBA) 
+
+head(mlb_woba)
+```
+
+```{r}
+postings <- read.csv("Posting System.csv")
+
+NPB <- c("Chunichi Dragons", "Hanshin Tigers", "Hiroshima Toyo Carp", "Tokyo Yakult Swallows", "Yokohama DeNA BayStars", "Yomiuri Giants", "Chiba Lotte Marines", "Fukuoka SoftBank Hawks", "Hokkaido Nippon-Ham Fighters", "Orix Buffaloes", "Saitama Seibu Lions", "Tohoku Rakuten Golden Eagles")
+
+postings <- postings %>%
+  # only including official NPB teams (excluding KBO)
+  filter(NPB.Team %in% NPB) |>
+  # extract 4-digit posting year from Posting.Data column
+  mutate(datelen = nchar(Posting.Date), 
+         yr = as.numeric(substr(Posting.Date, datelen - 3, datelen)))
+
+# filter for players posted btw 2019 and 2023, aligning w/ project scope
+players <- postings %>% filter(yr >= 2019, yr < 2024)
+
+```
+
+- **Got 9 relevant NPB-to-MLB players posted between 2019 and 2023.**
+
+```{r}
+# Read and filter relevant data
+npbdata <- read.csv("NPB Player Data 19-25.csv")
+head(npbdata)
+npbmissing <- read.csv("NPB Missing Player Data.csv")
+head(npbmissing)
+postings <- read.csv("Posting System.csv")
+head(postings)
+
+# fix missing 1B calculation for players lacking full breakdown
+npbmissing <- npbmissing %>% 
+  mutate(X1B = TB - (2 * X2B) - (3 * X3B) - (4 * HR))
+
+#just put the names bcs some of them are named differently/nicknames in the fangraphs one 
+pdnames <- c("Yoshi Tsutsugo", "Ryosuke Kikuchi", "Seiya Suzuki", "Masataka Yoshida")
+
+# Filter and combine
+pdata <- npbdata %>% filter(Name %in% pdnames)
+pdata <- pdata %>% 
+  full_join(npbmissing, by = intersect(colnames(pdata), colnames(npbmissing)))
+
+head(pdata)
+
+```
+
+- `pdata`: merged dataset with complete stats for:
+  - 4 hitters with full statlines from `npbdata`
+  - addtiional years for players like Tsutsugo, Fujinami, Imanaga, Yamamoto, Sugano, etc. from `npbmissing`
+
+- This combined data lets you 
+  -  match these NPB stats with future MLB data
+  -  calculate pre-post diff or regress against age
+  -  use variables like X1B, X2B, HR, BB, SO, AVG, OPS, etc.
+
+```{r}
+npb_woba <- pdata |>
+  # adds weights like wBB, w1B, w2B, etc. to each season in `pdata`
+  left_join(woba_factors, by = "Season") |>
+  # calculates weighted On-Base Average
+  mutate(wOBA = (wBB * BB + wHBP + w1B * X1B + w2B * X2B + w3B * X3B + wHR * HR) / (AB + BB - IBB + SF + HBP)) |>
+  # renames and keeps only the clean columns: Players, Age, Season, wOBA
+  select(Player = Name, Age, Season, wOBA) 
+
+npb_woba
+
+```
+
+
+```{r}
+# add ages into the mlb dataset
+# function to eliminate differences in player names
+clean_name <- function(x) {
+  x |>
+    # remove accents
+    stri_trans_general("Latin-ASCII") |>
+    # drop Jr, etc
+    gsub(pattern = "\\b(JR|SR|III|II|IV)\\.?$", replacement = "", ignore.case = TRUE) |>
+    # remove periods
+    gsub(pattern = "\\. ", replacement = " ") |>
+    # remove periods
+    gsub(pattern = "\\.", replacement = " ") |>
+    gsub(pattern = "(?<=\\b\\w) [A-Z] (?=\\w\\b)", replacement = " ", perl = TRUE) |>
+    # collapse multiple spaces
+    gsub(pattern = "\\s+", replacement = " ") |>
+    # trims extra spaces
+    trimws()
+}
+
+# ensures that the name of the same player matches across datasets
+mlb$G <- clean_name(mlb$G)
+mlb_births$Name <- clean_name(mlb_births$Name)
+
+# joins the player birthdays to the mlb dataset
+mlb <- mlb |>
+  left_join(mlb_births,
+            by = c("G" = "Name"),
+            relationship = "many-to-many") |>
+  mutate(Age = SEASON - birthYear)
+```
+
+```{r}
+mlb_woba <- mlb |>
+  # merges player batting stats with season-specific wOBA coefficients
+  left_join(woba_factors, by = c("SEASON" = "Season")) |> 
+  # calculates wOBA per player per season using MLB's official formula
+  mutate(wOBA = (wBB * BB + wHBP + w1B * X1B + w2B * X2B + w3B * X3B + wHR * HR) / (AB + BB - IBB + SF + HBP)) |> 
+  # selects relevant columns: Player name (from G), team, season, split (e.g., "SECOND"), and computed wOBA
+  select(Player = G, Team, Season = SEASON, Split = SPLIT, Age, wOBA) 
+
+head(mlb_woba)
+```
+
+```{r}
+npb_players <- unique(clean_name(npb_woba$Player))
+npb_players
+
+mlb_players <- unique(mlb_woba$Player)
+
+intersect(npb_players, mlb_players)
+```
+
+\newpage
+
+## Methodologies
+
+### 1. Delta Analysis (MLB Year 1 - NPB Final Year)
+
+**Metrics:**
+
+  - wOBA
+  - ISO (Isolated Power = SLG - AVG)
+  - K% = SO / PA
+  - BB% = BB / PA
+  
+**Implementation Tips:**
+
+  - Compute all four for NPB Final Year and MLB Year 1
+  - Then calculate: 
+  
+  `delta_wOBA = MLB_wOBA - NPB_wOBA`
+  
+  `delta_Kpct = MLB_SO / MLB_PA - NPB_SO / NPB_PA`
+  
+  `delta_BBpct = MLB_BB / MLB_PA - NPB_BB / NPB_PA`
+  
+  `delta_ISO = MLB_SLG - MLB_AVG - (NPB_SLG - NPB_AVG)`
+
+**Why it works:**
+
+- Simple yet powerful way to visualize change
+- use bar plot or dot chart to show each player's delta
+
+```{r}
+# prep NPB Final Year Stats
+npb_final <- pdata %>%
+  filter(Season == max(Season)) %>%
+  group_by(Name) %>%
+  slice_max(Season, n = 1) %>%
+  mutate(
+    ISO = SLG - AVG,
+    Kpct = SO / PA,
+    BBpct = BB / PA
+  ) %>%
+  left_join(woba_factors, by = "Season") %>%
+  mutate(
+    wOBA = (wBB * BB + wHBP + w1B * X1B + w2B * X2B + w3B * X3B + wHR * HR) / (AB + BB - IBB + SF + HBP)
+  ) %>%
+  select(Player = Name, NPB_Season = Season, NPB_wOBA = wOBA, NPB_ISO = ISO, NPB_Kpct = Kpct, NPB_BBpct = BBpct, NPB_AVG = AVG, NPB_SLG = SLG)
+
+# prep MLB year 1 stats
+
+```
+
+
+### 2. League-Adjusted Z-Score Comparison
+
+**Z-score logic:**
+
+  `z_NPB = (NPB_Player_wOBA - NPB_League_Avg) / NPB_League_SD`
+  
+  `z_MLB = (MLB_Player_wOBA - MLB_League_Avg) / MLB_League_SD`
+  
+**Plot:**
+
+- Scatterplot of z_NPB vs z_MLB with 45 degrees line for equal performance
+- Label players above/below the line
+
+**Why it's strong**:
+- Controls for offensive environments (e.g., dead ball vs. Juiced ball era)
+- Helps you ask: was a star in Japan still a star in MLB?
+
+### 3. Regression: NPB -> MLB Performance
+
+**Model:**
+
+  `lm(MLB_wOBA ~ NPB_wOBA + Age)`
+  
+**Alternative:**
+  
+- Add quadratic term for Age if non-linear:
+
+  `lm(MLB_wOBA ~ NPB_wOBA + Age + I(Age^2))`
+  
+**Outputs:**
+
+- coefficients (e.g., how much each point of NPB wOBA is "worth")
+- R-squared to measure model fit
+- Use `predict()` to generate expected MLB wOBA
+
+### 4. Residal Analysis (Over- vs. Under-Performance)
+
+**Residual = Actual MLB wOBA - Predicted MLB wOBA**
+  
+**Visualize:**
+  
+- Histogram of residuals
+- Label top 3 over/under performers
+- Boxplot split by age group
+  
+**Why this matters:**
+
+- Tells the "surprise storeis"
+- Great storytelling in final presentation
+
+### 5. Time Series Adjustment (3-Year MLB Trajectory)
+
+**For players with more than 3 MLB years:**
+
+- Plot:
+  - NPB Final year
+  - MLB year 1
+  - MLB year 2
+  - MLB year 3
+- Separate age groups: 24-26 vs. 29+
+  
+**Visual:**
+
+- Line plot per player or group averages
+- faucet by age group
+  
+- Histogram of residuals
+- Label top 3 over/under performers
+- Boxplot split by age group
+  
+**Why it matters:**
+
+- shows adaptation curve -- do they improve, decline, or hold steady?
+- can support insight like: "younger hitters adapt faster"
+
+
